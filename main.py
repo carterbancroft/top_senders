@@ -59,34 +59,55 @@ def extract_sender_from_message(message_data):
         print(f"Error extracting sender: {error}")
         return None
 
-def get_senders_individual(service, message_ids):
-    """Get senders from messages using individual API calls with rate limiting."""
+def get_senders_batch(service, message_ids):
+    """Get senders from messages using batch API with 2 requests per batch."""
     sender_counts = defaultdict(int)
-    total = len(message_ids)
+    batch_results = {}
+    batch_size = 10
 
-    print(f"Processing {total} messages individually...")
-    for i, msg_id in enumerate(message_ids):
-        try:
-            message = service.users().messages().get(
-                userId='me',
-                id=msg_id,
-                format='metadata',
-                metadataHeaders=['From']
-            ).execute()
+    def callback(request_id, response, exception):
+        if exception:
+            print(f"Error in batch request {request_id}: {exception}")
+        else:
+            batch_results[request_id] = response
 
-            sender = extract_sender_from_message(message)
+    total_batches = (len(message_ids) + batch_size - 1) // batch_size
+    print(f"Processing {len(message_ids)} messages in {total_batches} batches of {batch_size}...")
+
+    # Process messages in batches
+    for i in range(0, len(message_ids), batch_size):
+        batch_ids = message_ids[i:i + batch_size]
+        batch = service.new_batch_http_request(callback=callback)
+
+        # Add requests to batch
+        for msg_id in batch_ids:
+            batch.add(
+                service.users().messages().get(
+                    userId='me',
+                    id=msg_id,
+                    format='metadata',
+                    metadataHeaders=['From']
+                ),
+                request_id=msg_id
+            )
+
+        # Execute batch
+        batch_num = i // batch_size + 1
+        if batch_num % 25 == 0:
+            print(f"Processing batch {batch_num}/{total_batches}...")
+
+        batch.execute()
+
+        # Process results
+        for msg_id, message_data in batch_results.items():
+            sender = extract_sender_from_message(message_data)
             if sender:
                 sender_counts[sender] += 1
 
-            # Progress indicator
-            if (i + 1) % 50 == 0:
-                print(f"Processed {i + 1}/{total} messages...")
+        batch_results.clear()
 
-        except Exception as error:
-            print(f"Error getting message {msg_id}: {error}")
-
-        # Rate limiting - ~35 requests per second
-        time.sleep(0.03)
+        # Rate limiting between batches - conservative
+        time.sleep(0.1)
 
     return dict(sender_counts)
 
@@ -147,8 +168,8 @@ def fetch_senders(service, limit=None):
         print("No messages found")
         return {}
 
-    # Use individual API calls to get senders
-    sender_counts = get_senders_individual(service, message_ids)
+    # Use batch API calls to get senders
+    sender_counts = get_senders_batch(service, message_ids)
 
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -169,4 +190,4 @@ if __name__ == '__main__':
         print(f"Authenticated as: {profile['emailAddress']}")
         print(f"Total messages: {profile['messagesTotal']}")
         print("="*50)
-        fetch_senders(service, limit=1000)
+        fetch_senders(service, limit=5000)
