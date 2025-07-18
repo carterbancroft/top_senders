@@ -11,8 +11,7 @@ from collections import defaultdict
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-# Gmail API scope for readonly access
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+from config import SCOPES, EXCLUDED_EMAILS
 
 def authenticate_gmail():
     """Authenticate with Gmail API and return service object."""
@@ -41,6 +40,28 @@ def authenticate_gmail():
     service = build('gmail', 'v1', credentials=creds)
     return service
 
+def deauth_gmail():
+    """Remove stored credentials to force re-authentication."""
+    token_file = 'token.pickle'
+    if os.path.exists(token_file):
+        os.remove(token_file)
+        print("Removed stored credentials. Next authentication will prompt for new account.")
+    else:
+        print("No stored credentials found.")
+
+def prompt_for_action():
+    """Prompt user for what action to take."""
+    print("\nWhat would you like to do?")
+    print("1. Analyze current account")
+    print("2. Switch to different account (de-auth and re-auth)")
+    print("3. Exit")
+
+    while True:
+        choice = input("Enter choice (1, 2, or 3): ").strip()
+        if choice in ['1', '2', '3']:
+            return choice
+        print("Invalid choice. Please enter 1, 2, or 3.")
+
 def extract_sender_from_message(message_data):
     """Extract sender email from message data."""
     try:
@@ -63,7 +84,7 @@ def get_senders_batch(service, message_ids):
     """Get senders from messages using batch API with 2 requests per batch."""
     sender_counts = defaultdict(int)
     batch_results = {}
-    batch_size = 10
+    batch_size = 12
 
     def callback(request_id, response, exception):
         if exception:
@@ -101,7 +122,7 @@ def get_senders_batch(service, message_ids):
         # Process results
         for msg_id, message_data in batch_results.items():
             sender = extract_sender_from_message(message_data)
-            if sender:
+            if sender and sender not in EXCLUDED_EMAILS:
                 sender_counts[sender] += 1
 
         batch_results.clear()
@@ -126,7 +147,7 @@ def get_all_message_ids(service, max_messages=None):
             userId='me',
             maxResults=page_size,
             pageToken=page_token,
-            q='-in:spam -in:trash'
+            q='in:inbox'
         ).execute()
 
         messages = result.get('messages', [])
@@ -177,7 +198,7 @@ def fetch_senders(service, limit=None):
     print(f"\nProcessing completed in {elapsed_time:.1f} seconds ({elapsed_time/60:.1f} minutes)")
 
     print(f"\nTop 20 senders:")
-    top_senders = sorted(sender_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    top_senders = sorted(sender_counts.items(), key=lambda x: x[1], reverse=True)[:100]
     for sender, count in top_senders:
         print(f"{sender}: {count} messages")
 
@@ -190,4 +211,27 @@ if __name__ == '__main__':
         print(f"Authenticated as: {profile['emailAddress']}")
         print(f"Total messages: {profile['messagesTotal']}")
         print("="*50)
-        fetch_senders(service, limit=5000)
+
+        choice = prompt_for_action()
+
+        if choice == '1':
+            # Analyze current account
+            fetch_senders(service, limit=10000)
+        elif choice == '2':
+            # Switch to different account
+            deauth_gmail()
+            print("Re-authenticating with new account...")
+            service = authenticate_gmail()
+            if service:
+                profile = service.users().getProfile(userId='me').execute()
+                print(f"Now authenticated as: {profile['emailAddress']}")
+                print(f"Total messages: {profile['messagesTotal']}")
+                print("="*50)
+                fetch_senders(service, limit=10000)
+            else:
+                print("Re-authentication failed.")
+        elif choice == '3':
+            # Exit
+            print("Exiting...")
+    else:
+        print("Authentication failed.")
